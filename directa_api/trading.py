@@ -3,6 +3,7 @@ import logging
 import time
 import re
 import datetime
+import random
 from typing import Optional, Dict, List, Union, Tuple, Any
 
 from directa_api.parsers import (
@@ -61,7 +62,7 @@ class DirectaTrading:
         
         # Simulation data (used only in simulation mode)
         self.simulated_portfolio = []
-        self.simulated_orders = []
+        self.simulated_orders = {}  # Dictionary with order_id as key
         self.simulated_account = {
             "account_code": "SIM1234",
             "liquidity": 10000.0,
@@ -678,8 +679,8 @@ class DirectaTrading:
         else:
             raise ValueError("Side must be either 'BUY' or 'SELL'")
         
-        # Generate a unique order ID
-        order_id = f"ORD{int(time.time())}"
+        # Generate a unique order ID with timestamp and a random component
+        order_id = f"ORD{int(time.time())}_{random.randint(1000, 9999)}"
         
         if order_type == "LIMIT":
             command = f"{cmd_prefix} {order_id},{symbol},{quantity},{price}"
@@ -702,14 +703,15 @@ class DirectaTrading:
                 "time": current_time
             }
             
-            # Add to simulated orders list
-            self.simulated_orders.append(new_order)
+            # Add to simulated orders dictionary with order_id as key
+            self.simulated_orders[order_id] = new_order
             
             # Create simulated response
             response = f"TRADOK;{symbol};{order_id};SENT;{side};{quantity};{price};0;0;{quantity};SIMREF001;{command}"
             
             if not parse:
                 return response
+            
             return parse_order_response(response)
         
         # Real mode - use actual API
@@ -748,14 +750,14 @@ class DirectaTrading:
         if self.simulation_mode:
             # In simulation mode, find and update the order in our simulated list
             order_found = False
-            for order in self.simulated_orders:
+            for order in self.simulated_orders.values():
                 if order["order_id"] == order_id:
                     order["status"] = "CANCELLED"
                     order_found = True
                     break
             
             if order_found:
-                symbol = next((o["symbol"] for o in self.simulated_orders if o["order_id"] == order_id), "UNKNOWN")
+                symbol = next((o["symbol"] for o in self.simulated_orders.values() if o["order_id"] == order_id), "UNKNOWN")
                 response = f"TRADOK;{symbol};{order_id};CANCELLED;CANCEL;0;0;0;0;0;SIMREF002;REVORD {order_id}"
             else:
                 response = "ERR;N/A;1020"  # Order not found
@@ -830,7 +832,7 @@ class DirectaTrading:
                 # Format order entries
                 order_lines = []
                 
-                for order in self.simulated_orders:
+                for order in self.simulated_orders.values():
                     line = f"ORDER;{order['symbol']};{order['time']};{order['order_id']};{order['side']};{order['price']};0;{order['quantity']};{order['status']}"
                     order_lines.append(line)
                 
@@ -931,39 +933,52 @@ class DirectaTrading:
         }
     
     # Simulation helper methods
-    def add_simulated_position(self, symbol: str, quantity: int, avg_price: float = 0, gain: float = 0) -> None:
+    def add_simulated_position(self, symbol: str, quantity: int, price: float):
         """
-        Add a position to the simulated portfolio (simulation mode only)
+        Add a position to the simulated portfolio.
+        If the position already exists, update its quantity and average price.
         
         Args:
-            symbol: Symbol/ticker of the position
-            quantity: Number of shares
-            avg_price: Average purchase price
-            gain: Unrealized gain/loss
+            symbol: The symbol of the position
+            quantity: The quantity to add (can be negative for selling)
+            price: The price of the new position
         """
         if not self.simulation_mode:
             self.logger.warning("add_simulated_position called but simulation mode is not active")
             return
-            
-        # Check if position already exists
+        
+        # Find if we already have this position
         for position in self.simulated_portfolio:
             if position["symbol"] == symbol:
-                # Update existing position
-                position["quantity"] += quantity
-                if quantity > 0:  # Only recalculate avg price on buys
-                    position["avg_price"] = avg_price
-                position["gain"] = gain
-                self.logger.info(f"Updated simulated position: {symbol}, quantity: {position['quantity']}")
-                return
+                # Calculate new average price based on quantities
+                new_qty = position["quantity"] + quantity
+                if new_qty <= 0:
+                    # Remove this position if quantity goes to 0 or negative
+                    self.simulated_portfolio = [p for p in self.simulated_portfolio if p["symbol"] != symbol]
+                    return
                 
-        # Add new position
-        self.simulated_portfolio.append({
+                position["avg_price"] = ((position["quantity"] * position["avg_price"]) + 
+                                        (quantity * price)) / new_qty
+                position["quantity"] = new_qty
+                self.logger.debug(f"Updated simulated position: {position}")
+                # Update total balance after position change
+                self.update_simulated_total_balance()
+                return
+        
+        # New position
+        if quantity <= 0:
+            self.logger.warning(f"Tried to add a new position with quantity <= 0: {symbol}, {quantity}")
+            return
+        
+        new_position = {
             "symbol": symbol,
             "quantity": quantity,
-            "avg_price": avg_price,
-            "gain": gain
-        })
-        self.logger.info(f"Added simulated position: {symbol}, quantity: {quantity}")
+            "avg_price": price
+        }
+        self.simulated_portfolio.append(new_position)
+        self.logger.debug(f"Added new simulated position: {new_position}")
+        # Update total balance after new position
+        self.update_simulated_total_balance()
     
     def remove_simulated_position(self, symbol: str) -> bool:
         """
@@ -1009,69 +1024,152 @@ class DirectaTrading:
             
         self.logger.info(f"Updated simulated account: liquidity={self.simulated_account['liquidity']}, equity={self.simulated_account['equity']}")
     
-    def simulate_order_execution(self, order_id: str, executed_price: float = None, 
-                                executed_quantity: int = None) -> bool:
+    def fix_test(self):
+        """Reset simulated account and portfolio for testing."""
+        if not self.simulation_mode:
+            logging.warning("fix_test called but simulation mode is not active")
+            return
+
+        # Reset to initial state
+        self.simulated_account = {
+            "account_code": "SIM1234",  # Important for get_account_info
+            "broker_id": "DEMO",
+            "account_name": "Simulated Account",
+            "currency": "EUR",
+            "liquidity": 10000.0,
+            "equity": 10000.0,
+            "mtd": 0.0,
+            "ytd": 0.0,
+            "pl_daily": 0.0,
+            "pl_ytd": 0.0,
+            "total_balance": 10000.0,
+        }
+        self.simulated_portfolio = []
+        self.simulated_orders = {}
+        logging.info("Simulation state reset for testing")
+        return {"success": True, "data": "Simulation reset"}
+
+    def simulate_order_execution(self, order_req: Union[str, dict], fill_price: Optional[float] = None, executed_price: Optional[float] = None) -> dict:
         """
-        Simulate execution of an order (simulation mode only)
+        Simulates the execution of an order by updating the account balances and portfolio.
         
         Args:
-            order_id: ID of the order to execute
-            executed_price: Execution price (if None, uses order price)
-            executed_quantity: Quantity executed (if None, uses full order quantity)
-            
+            order_req: Either the order ID (string) or the order details (dictionary)
+            fill_price: Price at which the order is filled (if None, use the price from order_req)
+            executed_price: Alternative name for fill_price (for backward compatibility)
+        
         Returns:
-            True if order was found and executed, False otherwise
+            A dictionary containing the simulated response with execution details
         """
         if not self.simulation_mode:
             self.logger.warning("simulate_order_execution called but simulation mode is not active")
-            return False
+            return {"success": False, "error": "Simulation mode not active"}
+        
+        # Use executed_price if provided (for backward compatibility)
+        if executed_price is not None:
+            fill_price = executed_price
             
-        for order in self.simulated_orders:
-            if order["order_id"] == order_id:
-                # Set execution details
-                exec_price = executed_price if executed_price is not None else order["price"]
-                exec_qty = executed_quantity if executed_quantity is not None else order["quantity"]
-                
-                # Update order status
-                order["status"] = "EXECUTED"
-                order["executed_price"] = exec_price
-                order["executed_quantity"] = exec_qty
-                
-                # Update portfolio
-                symbol = order["symbol"]
-                side = order["side"]
-                
-                if side == "BUY":
-                    # Add to portfolio
-                    self.add_simulated_position(symbol, exec_qty, exec_price)
+        # If order_req is a string (order ID), find the order in simulated_orders
+        if isinstance(order_req, str):
+            order_id = order_req
+            found_order = None
+            for order in self.simulated_orders.values():
+                if order.get("order_id") == order_id:
+                    found_order = order
+                    order_req = order
+                    break
+            else:
+                return {"success": False, "error": f"Order ID {order_id} not found"}
+        
+        # Extract order details
+        symbol = order_req.get("symbol", "")
+        side = order_req.get("side", "").upper()
+        quantity = int(order_req.get("quantity", 0))
+        price = fill_price if fill_price is not None else float(order_req.get("price", 0))
+        
+        # Check for required fields
+        if not all([symbol, side, quantity, price]):
+            return {"success": False, "error": "Missing required order fields"}
+        
+        # Calculate order value
+        order_value = quantity * price
+        
+        # Update account based on order type
+        if side == "BUY":
+            # Check if we have enough liquidity
+            if order_value > self.simulated_account.get("liquidity", 0):
+                return {"success": False, "error": "Insufficient funds for buy order"}
+            
+            # Reduce liquidity
+            self.simulated_account["liquidity"] -= order_value
+            
+            # Add position
+            self.add_simulated_position(symbol, quantity, price)
+            
+        elif side == "SELL":
+            # Find the position
+            position_found = False
+            for position in self.simulated_portfolio:
+                if position["symbol"] == symbol:
+                    if position["quantity"] < quantity:
+                        return {"success": False, "error": "Insufficient shares for sell order"}
                     
-                    # Update account liquidity
-                    new_liquidity = self.simulated_account["liquidity"] - (exec_price * exec_qty)
-                    self.update_simulated_account(liquidity=new_liquidity)
-                elif side == "SELL":
-                    # Find position
-                    position_found = False
-                    for position in self.simulated_portfolio:
-                        if position["symbol"] == symbol:
-                            position_found = True
-                            # Reduce position
-                            if position["quantity"] >= exec_qty:
-                                position["quantity"] -= exec_qty
-                                if position["quantity"] <= 0:
-                                    self.remove_simulated_position(symbol)
-                            else:
-                                self.logger.warning(f"Selling more shares ({exec_qty}) than in portfolio ({position['quantity']})")
-                            break
+                    # Increase liquidity (we sold shares)
+                    self.simulated_account["liquidity"] += order_value
                     
-                    if not position_found:
-                        self.logger.warning(f"Selling shares of {symbol} not in portfolio")
-                            
-                    # Update account liquidity
-                    new_liquidity = self.simulated_account["liquidity"] + (exec_price * exec_qty)
-                    self.update_simulated_account(liquidity=new_liquidity)
-                
-                self.logger.info(f"Simulated execution of order {order_id}: {exec_qty} shares at {exec_price}")
-                return True
-                
-        self.logger.warning(f"Attempted to execute non-existent order: {order_id}")
-        return False 
+                    # Reduce position quantity
+                    new_qty = position["quantity"] - quantity
+                    if new_qty == 0:
+                        # Remove position completely
+                        self.simulated_portfolio = [p for p in self.simulated_portfolio if p["symbol"] != symbol]
+                    else:
+                        # Update quantity
+                        position["quantity"] = new_qty
+                    
+                    position_found = True
+                    break
+            
+            if not position_found:
+                return {"success": False, "error": f"Position {symbol} not found in portfolio"}
+        else:
+            return {"success": False, "error": f"Unsupported order side: {side}"}
+        
+        # Update total balance after the operation
+        self.update_simulated_total_balance()
+        
+        # Create a simulated execution response
+        execution_resp = {
+            "success": True,
+            "data": {
+                "order_id": f"sim-{int(time.time() * 1000)}",
+                "symbol": symbol,
+                "side": side,
+                "quantity": quantity,
+                "price": price,
+                "value": order_value,
+                "execution_time": datetime.datetime.now().isoformat(),
+                "account_status": {
+                    "liquidity": self.simulated_account.get("liquidity", 0),
+                    "portfolio_count": len(self.simulated_portfolio),
+                    "total_balance": self.simulated_account.get("total_balance", 0)
+                }
+            }
+        }
+        
+        self.logger.info(f"Simulated order execution: {side} {quantity} {symbol} @ {price}")
+        return execution_resp
+    
+    def update_simulated_total_balance(self):
+        """
+        Update the total balance of the simulated account based on cash liquidity and portfolio value.
+        """
+        if not self.simulation_mode:
+            self.logger.warning("update_simulated_total_balance called but simulation mode is not active")
+            return
+            
+        portfolio_value = 0.0
+        for position in self.simulated_portfolio:
+            portfolio_value += position["quantity"] * position.get("avg_price", 0)
+            
+        self.simulated_account["total_balance"] = self.simulated_account["liquidity"] + portfolio_value
+        self.logger.info(f"Updated simulated total balance: {self.simulated_account['total_balance']}") 
