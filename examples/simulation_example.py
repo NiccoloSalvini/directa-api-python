@@ -9,6 +9,7 @@ import sys
 import time
 import logging
 import json
+import datetime
 
 # Aggiungi la directory principale al path per importare directa_api
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -20,7 +21,14 @@ logging.basicConfig(level=logging.INFO)
 
 def json_pretty_print(data):
     """Stampa i dati come JSON formattato"""
-    print(json.dumps(data, indent=2, sort_keys=True))
+    # Custom JSON encoder to handle datetime objects
+    class DateTimeEncoder(json.JSONEncoder):
+        def default(self, obj):
+            if isinstance(obj, datetime.datetime):
+                return obj.isoformat()
+            return json.JSONEncoder.default(self, obj)
+    
+    print(json.dumps(data, indent=2, sort_keys=True, cls=DateTimeEncoder))
 
 def main():
     print("Esempio modalità simulazione Directa Trading API")

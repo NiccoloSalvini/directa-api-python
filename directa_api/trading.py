@@ -1,4 +1,11 @@
-import socket
+#!/usr/bin/env python3
+"""
+Directa API - Trading Module
+
+Questo modulo fornisce l'interfaccia per le operazioni di trading
+attraverso l'API di Directa Trading.
+"""
+
 import logging
 import time
 import re
@@ -6,6 +13,8 @@ import datetime
 import random
 from typing import Optional, Dict, List, Union, Tuple, Any
 
+from directa_api.connection import TradingConnection
+from directa_api.simulation import TradingSimulation
 from directa_api.parsers import (
     parse_portfolio_response,
     parse_order_response,
@@ -23,54 +32,118 @@ logging.basicConfig(
 
 class DirectaTrading:
     """
-    A wrapper for the Directa Trading API (port 10002)
+    Interfaccia per l'API di trading Directa (porta 10002)
     
-    This class handles socket connections to the Directa Trading API
-    for executing trades and managing orders.
+    Questa classe gestisce le operazioni di trading attraverso l'API di Directa,
+    inclusa la gestione degli ordini, del portafoglio e delle informazioni dell'account.
     
-    Note: Requires the Darwin trading platform to be running.
+    Nota: Richiede la piattaforma Darwin in esecuzione.
     """
     
     def __init__(self, host: str = "127.0.0.1", port: int = 10002, buffer_size: int = 4096, 
-                 simulation_mode: bool = False):
+                 simulation_mode: bool = False, max_retries: int = 0, retry_delay: int = 1):
         """
-        Initialize the DirectaTrading API wrapper
+        Inizializza l'interfaccia DirectaTrading
         
         Args:
-            host: The hostname (default: 127.0.0.1)
-            port: The port for trading API (default: 10002)
-            buffer_size: Socket buffer size for receiving responses
-            simulation_mode: If True, simulates trading operations without real money
+            host: Hostname (default: 127.0.0.1)
+            port: Porta per l'API di trading (default: 10002)
+            buffer_size: Dimensione del buffer socket
+            simulation_mode: Se True, simula le operazioni senza denaro reale
+            max_retries: Numero massimo di tentativi di connessione
+            retry_delay: Ritardo tra i tentativi di connessione in secondi
         """
-        self.host = host
-        self.port = port
-        self.buffer_size = buffer_size
-        self.socket = None
         self.logger = logging.getLogger("DirectaTrading")
-        self.connected = False
-        self.last_darwin_status = None
-        self.connection_status = "UNKNOWN"
-        self.is_trading_connected = False
         self.simulation_mode = simulation_mode
+        self.max_retries = max_retries
+        self.retry_delay = retry_delay
         
-        # Connection tracking
+        # Crea la connessione all'API
+        self.connection = TradingConnection(host, port, buffer_size)
+        
+        # Inizializza il simulatore se richiesto
+        self.simulation = TradingSimulation() if simulation_mode else None
+        
+        if simulation_mode:
+            self.logger.warning("MODALITÀ SIMULAZIONE ATTIVA - Nessuna operazione reale sarà eseguita")
+            
+        # Inizializzazione attributi per il monitoraggio delle connessioni
+        self.connection_status = "DISCONNECTED"
+        self.is_trading_connected = False
+        self.connection_state_changes = []
         self.connection_history = []
         self.connection_attempts = 0
         self.last_connection_time = None
         self.last_status_check = None
-        self.connection_state_changes = []
+        self.last_darwin_status = None
+    
+    def connect(self, max_retries: Optional[int] = None, retry_delay: Optional[int] = None) -> bool:
+        """
+        Stabilisce una connessione all'API di Directa Trading
         
-        # Simulation data (used only in simulation mode)
-        self.simulated_portfolio = []
-        self.simulated_orders = {}  # Dictionary with order_id as key
-        self.simulated_account = {
-            "account_code": "SIM1234",
-            "liquidity": 10000.0,
-            "equity": 10000.0
-        }
+        Args:
+            max_retries: Numero massimo di tentativi di connessione (sovrascrive il valore di inizializzazione)
+            retry_delay: Ritardo tra i tentativi in secondi (sovrascrive il valore di inizializzazione)
+            
+        Returns:
+            bool: True se la connessione è riuscita, False altrimenti
+        """
+        # In simulazione, non serve connettersi
+        if self.simulation_mode:
+            self.logger.info("Simulazione: connessione sempre attiva")
+            return True
         
-        if simulation_mode:
-            self.logger.warning("SIMULATION MODE ACTIVE - No real trading will occur")
+        # Imposta i valori di retry se specificati
+        max_retries = max_retries if max_retries is not None else self.max_retries
+        retry_delay = retry_delay if retry_delay is not None else self.retry_delay
+        
+        # Tentativi di connessione
+        for attempt in range(max_retries + 1):
+            if attempt > 0:
+                self.logger.info(f"Tentativo di connessione {attempt}/{max_retries}...")
+                time.sleep(retry_delay)
+            
+            if self.connection.connect():
+                self.logger.info("Connessione all'API di trading stabilita")
+                return True
+        
+        self.logger.error(f"Connessione fallita dopo {max_retries + 1} tentativi")
+        return False
+    
+    def disconnect(self) -> None:
+        """Chiude la connessione all'API di trading"""
+        if not self.simulation_mode and self.connection:
+            self.connection.disconnect()
+            self.logger.info("Disconnessione dall'API di trading completata")
+    
+    def __enter__(self):
+        """Supporto per il protocollo context manager"""
+        self.connect()
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Supporto per il protocollo context manager"""
+        self.disconnect()
+    
+    def send_command(self, command: str) -> str:
+        """
+        Invia un comando all'API di trading
+        
+        Args:
+            command: Comando da inviare
+            
+        Returns:
+            str: Risposta dall'API
+            
+        Raises:
+            ConnectionError: Se non connesso all'API
+        """
+        if self.simulation_mode:
+            self.logger.debug(f"Simulazione comando: {command}")
+            # In simulazione, restituisci una risposta fittizia
+            return f"SIMULATED;{command};OK"
+        
+        return self.connection.send_command(command)
     
     def set_connection_status(self, status: str, is_connected: bool) -> None:
         """
@@ -103,93 +176,6 @@ class DirectaTrading:
             self.connection_status = status
             self.is_trading_connected = is_connected
             self.logger.info(f"Connection status changed: {self.connection_status}")
-    
-    def connect(self) -> bool:
-        """
-        Establish a connection to the Directa Trading API
-        
-        Returns:
-            bool: True if connection successful, False otherwise
-        """
-        try:
-            self.connection_attempts += 1
-            self.last_connection_time = datetime.datetime.now()
-            
-            self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.socket.connect((self.host, self.port))
-            self.connected = True
-            self.logger.info(f"Connected to Directa Trading API on {self.host}:{self.port}")
-            
-            # Record connection success
-            self.connection_history.append({
-                "timestamp": self.last_connection_time,
-                "attempt": self.connection_attempts,
-                "success": True,
-                "details": f"Connected to {self.host}:{self.port}"
-            })
-            
-            # Use a longer timeout for initial connection to match telnet behavior
-            self.socket.settimeout(3.0)  
-            
-            # Read initial data similar to telnet
-            try:
-                # Wait a short time to ensure all initial data is received
-                time.sleep(0.2)
-                
-                initial_data = b""
-                try:
-                    while True:
-                        chunk = self.socket.recv(self.buffer_size)
-                        if not chunk:
-                            break
-                        initial_data += chunk
-                        
-                        # If we received a complete message with a newline, it's likely complete
-                        if b'\n' in chunk:
-                            # Check if we've already received a status message
-                            if b'DARWIN_STATUS' in initial_data:
-                                break
-                except (socket.timeout, BlockingIOError):
-                    # No more initial data available, this is expected
-                    pass
-                
-                if initial_data:
-                    initial_text = initial_data.decode('utf-8')
-                    self.logger.debug(f"Initial data received on connect: {initial_text.strip()}")
-                    
-                    # Check for darwin status in initial data
-                    self._check_for_darwin_status(initial_text)
-            except Exception as e:
-                self.logger.warning(f"Error processing initial data: {str(e)}")
-            finally:
-                # Restore normal timeout
-                self.socket.settimeout(2.0)
-            
-            # If we didn't get a status yet, explicitly request it
-            if not self.last_darwin_status or self.connection_status == "UNKNOWN":
-                try:
-                    status_response = self._update_darwin_status()
-                    if "CONN_OK" in status_response and not self.is_trading_connected:
-                        # Force update connection status if response says CONN_OK
-                        self.set_connection_status("CONN_OK", True)
-                        self.logger.info("Connection status updated to CONN_OK from explicit check")
-                except Exception as e:
-                    self.logger.warning(f"Failed to get initial Darwin status: {str(e)}")
-            
-            return True
-        except socket.error as e:
-            self.logger.error(f"Error connecting to Trading API: {str(e)}")
-            self.connected = False
-            
-            # Record connection failure
-            self.connection_history.append({
-                "timestamp": datetime.datetime.now(),
-                "attempt": self.connection_attempts,
-                "success": False,
-                "error": str(e),
-                "details": f"Failed to connect to {self.host}:{self.port}"
-            })
-            return False
     
     def _update_darwin_status(self):
         """
@@ -311,193 +297,6 @@ class DirectaTrading:
             except Exception as e:
                 self.logger.warning(f"Manual status check failed: {str(e)}")
     
-    def disconnect(self) -> None:
-        """Close the connection to the Directa Trading API"""
-        if self.socket and self.connected:
-            self.socket.close()
-            self.logger.info("Disconnected from Directa Trading API")
-            
-            # Record disconnection
-            timestamp = datetime.datetime.now()
-            self.connection_history.append({
-                "timestamp": timestamp,
-                "details": "Disconnected from API",
-                "was_connected": self.connected
-            })
-            
-            # Update connection status
-            self.set_connection_status("DISCONNECTED", False)
-        
-        self.connected = False
-        self.socket = None
-    
-    def __enter__(self):
-        """Support for context manager protocol"""
-        self.connect()
-        return self
-    
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """Support for context manager protocol"""
-        self.disconnect()
-    
-    def send_command(self, command: str) -> str:
-        """
-        Send a command to the Directa Trading API
-        
-        Args:
-            command: The command string to send
-        
-        Returns:
-            str: The response from the server
-        
-        Raises:
-            ConnectionError: If not connected to the API
-            socket.error: If an error occurs during sending/receiving
-        """
-        if not self.connected or not self.socket:
-            raise ConnectionError("Not connected to Directa Trading API")
-        
-        # Ensure command ends with newline
-        if not command.endswith('\n'):
-            command += '\n'
-        
-        try:
-            self.logger.debug(f"Sending command: {command.strip()}")
-            self.socket.sendall(command.encode('utf-8'))
-            
-            # Use slightly different timeout for status checks vs other commands
-            if command.strip() == "DARWINSTATUS":
-                # Use longer timeout for status checks
-                self.socket.settimeout(3.0)
-            else:
-                # Use standard timeout for other commands
-                self.socket.settimeout(2.0)
-                
-            response = b""
-            
-            # Read response with a timeout loop
-            start_time = time.time()
-            max_time = 3.0  # Maximum 3 seconds 
-            
-            while time.time() - start_time < max_time:
-                try:
-                    chunk = self.socket.recv(self.buffer_size)
-                    if not chunk:  # If no data, break
-                        if response:  # But only if we already have some data
-                            break
-                        # Otherwise keep waiting a bit
-                        time.sleep(0.1)
-                        continue
-                        
-                    response += chunk
-                    
-                    # Special handling for DARWINSTATUS - wait longer to get proper status
-                    if command.strip() == "DARWINSTATUS" and b"DARWIN_STATUS" in response:
-                        # When we get a DARWIN_STATUS response, wait a bit more for complete data
-                        time.sleep(0.1)
-                        try:
-                            # Try to get any additional data
-                            self.socket.settimeout(0.2)
-                            more_data = self.socket.recv(self.buffer_size)
-                            if more_data:
-                                response += more_data
-                        except (socket.timeout, BlockingIOError):
-                            pass  # No more data available, which is fine
-                        # Found our status response, can break
-                        break
-                        
-                    # For other commands, if we see a complete response, stop waiting
-                    if b'\n' in chunk:
-                        # If we have a command-specific response, we can break
-                        if (command.strip() == "INFOACCOUNT" and b"INFOACCOUNT" in response) or \
-                           (command.strip() == "INFOSTOCKS" and (b"STOCK" in response or b"ERR" in response)) or \
-                           (command.strip() == "ORDERLIST" and (b"ORDER" in response or b"ERR" in response)) or \
-                           (b"ERR" in response):  # Always break on error
-                            break
-                        
-                        # For other responses, wait a short time for any additional data
-                        time.sleep(0.1)
-                        try:
-                            self.socket.settimeout(0.1)
-                            more_data = self.socket.recv(self.buffer_size)
-                            if more_data:
-                                response += more_data
-                        except (socket.timeout, BlockingIOError):
-                            pass  # No more data, which is fine
-                        break
-                except socket.timeout:
-                    # No data received within timeout
-                    if response:  # If we already have data, we can stop
-                        break
-            
-            # Restore standard timeout
-            self.socket.settimeout(2.0)
-            
-            # If we didn't get any response, raise an error
-            if not response:
-                raise ConnectionError("No response received from server")
-                
-            response_text = response.decode('utf-8')
-            self.logger.debug(f"Received response: {response_text.strip()}")
-            
-            # Check for darwin status in the response
-            self._check_for_darwin_status(response_text)
-            
-            # Special handling for multi-line responses
-            lines = response_text.strip().split('\n')
-            if len(lines) > 1:
-                # Find the right response line based on the command
-                cmd_name = command.strip()
-                cmd_prefix = ""
-                
-                # Map commands to expected response prefixes
-                if cmd_name == "DARWINSTATUS":
-                    cmd_prefix = "DARWIN_STATUS"
-                elif cmd_name == "INFOACCOUNT":
-                    cmd_prefix = "INFOACCOUNT"
-                elif cmd_name == "INFOAVAILABILITY":
-                    cmd_prefix = "AVAILABILITY"
-                elif cmd_name == "INFOSTOCKS":
-                    cmd_prefix = "STOCK"
-                elif cmd_name == "ORDERLIST":
-                    cmd_prefix = "ORDER"
-                
-                # Search for matching response line
-                for line in lines:
-                    # Direct match with prefix
-                    if line.startswith(cmd_prefix):
-                        return line
-                    # Check for contained prefix (e.g., DARWIN_STATUS in a larger line)
-                    if cmd_prefix and cmd_prefix in line:
-                        return line
-                    # Always prioritize error responses
-                    if line.startswith("ERR;"):
-                        return line
-                
-                # Special case for DARWINSTATUS - always return line with DARWIN_STATUS if found
-                if cmd_name == "DARWINSTATUS":
-                    for line in lines:
-                        if "DARWIN_STATUS" in line:
-                            return line
-                
-                # Special case for INFOAVAILABILITY - also look for AVAILABILITY
-                if cmd_name == "INFOAVAILABILITY":
-                    for line in lines:
-                        if line.startswith("AVAILABILITY"):
-                            return line
-                
-                # If no specific match found, return the last non-empty line
-                for line in reversed(lines):
-                    if line.strip():
-                        return line
-            
-            return response_text
-        except socket.error as e:
-            self.logger.error(f"Socket error: {str(e)}")
-            raise
-    
-    # Trading API commands
-    
     def get_portfolio(self, parse: bool = True) -> Union[Dict[str, Any], str]:
         """
         Get the current portfolio information (stocks in portfolio and in trading)
@@ -509,27 +308,11 @@ class DirectaTrading:
             Dictionary with portfolio data or raw response string
         """
         if self.simulation_mode:
-            # In simulation mode, return simulated portfolio data
-            if not self.simulated_portfolio:
-                # Empty portfolio
-                response = "ERR;N/A;1018"
-            else:
-                # Format portfolio entries
-                current_time = datetime.datetime.now().strftime("%H:%M:%S")
-                portfolio_lines = []
-                
-                for position in self.simulated_portfolio:
-                    line = f"STOCK;{position['symbol']};{current_time};{position['quantity']};0;0;{position.get('avg_price', 0)};{position.get('gain', 0)}"
-                    portfolio_lines.append(line)
-                
-                response = "\n".join(portfolio_lines)
-            
-            if not parse:
-                return response
-            return parse_portfolio_response(response)
-            
-        # Real mode - use actual API
-        response = self.send_command("INFOSTOCKS")
+            return self.simulation.get_portfolio()
+        
+        command = "GETPORTFOLIO"
+        response = self.send_command(command)
+        
         if parse:
             return parse_portfolio_response(response)
         return response
@@ -545,16 +328,11 @@ class DirectaTrading:
             Dictionary with account details or raw response string
         """
         if self.simulation_mode:
-            # In simulation mode, return simulated account data
-            current_time = datetime.datetime.now().strftime("%H:%M:%S")
-            response = f"INFOACCOUNT;{current_time};{self.simulated_account['account_code']};{self.simulated_account['liquidity']};0;0.0;{self.simulated_account['equity']};SIM"
-            
-            if not parse:
-                return response
-            return parse_account_info_response(response)
+            return self.simulation.get_account_info()
         
-        # Real mode - use actual API
-        response = self.send_command("INFOACCOUNT")
+        command = "GETACCTINFO"
+        response = self.send_command(command)
+        
         if parse:
             return parse_account_info_response(response)
         return response
@@ -586,51 +364,46 @@ class DirectaTrading:
             Dictionary with Darwin status information or raw response string
         """
         if self.simulation_mode:
-            # In simulation mode, always return a successful connection
-            response = "DARWIN_STATUS;CONN_OK;TRUE;Release 2.5.1 build SIMULATION more info at http://app1.directatrading.com/trading-api-directa/index.html"
-            
-            if not parse:
-                return response
-                
-            # Parse the simulated response
-            status_resp = parse_darwin_status_response(response, self)
-            
-            # Add connection metrics in simulation mode
-            if "data" in status_resp and status_resp["data"] is not None:
-                status_resp["data"]["connection_metrics"] = self.get_connection_metrics()
-                status_resp["data"]["simulation_mode"] = True
-            
-            return status_resp
+            return self.simulation.get_darwin_status()
         
-        # Real mode - standard processing
         try:
-            response = self._update_darwin_status()
+            command = "DARWINSTATUS"
+            response = self.send_command(command)
+            
+            if parse:
+                status_resp = parse_darwin_status_response(response)
+                
+                # Aggiungi metriche di connessione
+                metrics = self.get_connection_metrics()
+                status_resp["data"]["connection_metrics"] = metrics
+                
+                return status_resp
+            
+            return response
         except Exception as e:
             if retry:
-                self.logger.warning(f"First Darwin status check failed: {str(e)}. Retrying...")
-                # Short pause before retry
-                time.sleep(0.5)
+                self.logger.warning(f"Errore durante il controllo dello stato ({str(e)}). Tentativo di recupero...")
+                time.sleep(1)
                 try:
-                    response = self._update_darwin_status()
-                except Exception as e2:
-                    self.logger.error(f"Darwin status check failed after retry: {str(e2)}")
-                    # Create error response
-                    response = f"DARWIN_STATUS;CONN_ERROR;ERROR;{str(e2)}"
-            else:
-                self.logger.error(f"Darwin status check failed: {str(e)}")
-                response = f"DARWIN_STATUS;CONN_ERROR;ERROR;{str(e)}"
-        
-        if not parse:
-            return response
+                    # Tenta di riconnettersi
+                    self.connect(max_retries=1)
+                    return self.get_darwin_status(parse, False)  # Chiama di nuovo senza retry
+                except Exception as retry_error:
+                    self.logger.error(f"Fallito il recupero dello stato: {str(retry_error)}")
             
-        # Use the enhanced parser that accepts the trading instance
-        status_resp = parse_darwin_status_response(response, self)
-        
-        # Add detailed connection metrics
-        if "data" in status_resp and status_resp["data"] is not None:
-            status_resp["data"]["connection_metrics"] = self.get_connection_metrics()
-        
-        return status_resp
+            # Restituisci un oggetto di errore formattato
+            error_msg = str(e)
+            if parse:
+                return {
+                    "success": False,
+                    "error": f"Errore durante il controllo dello stato: {error_msg}",
+                    "data": {
+                        "connection_status": "CONN_ERROR",
+                        "connection_metrics": self.get_connection_metrics()
+                    }
+                }
+            
+            return f"DARWIN_STATUS;CONN_ERROR;ERROR;{error_msg}"
     
     def get_position(self, symbol: str, parse: bool = True) -> Union[Dict[str, Any], str]:
         """
@@ -665,6 +438,9 @@ class DirectaTrading:
         Returns:
             Dictionary with order details or raw response string
         """
+        if self.simulation_mode:
+            return self.simulation.create_order(symbol, side, quantity, price, order_type)
+        
         side = side.upper()
         order_type = order_type.upper()
         
@@ -687,50 +463,7 @@ class DirectaTrading:
         else:
             command = f"{cmd_prefix} {order_id},{symbol},{quantity}"
         
-        if self.simulation_mode:
-            # In simulation mode, create simulated order response
-            current_time = datetime.datetime.now().strftime("%H:%M:%S")
-            
-            # Create the simulated order
-            new_order = {
-                "order_id": order_id,
-                "symbol": symbol,
-                "side": side,
-                "quantity": quantity,
-                "price": price,
-                "order_type": order_type,
-                "status": "PENDING",
-                "time": current_time
-            }
-            
-            # Add to simulated orders dictionary with order_id as key
-            self.simulated_orders[order_id] = new_order
-            
-            # Create simulated response
-            response = f"TRADOK;{symbol};{order_id};SENT;{side};{quantity};{price};0;0;{quantity};SIMREF001;{command}"
-            
-            if not parse:
-                return response
-            
-            return parse_order_response(response)
-        
-        # Real mode - use actual API
         response = self.send_command(command)
-        
-        # Check if we need to confirm the order
-        if "TRADCONFIRM" in response:
-            if not parse:
-                return response
-                
-            # Check if we should automatically confirm
-            confirm_response = parse_order_response(response)
-            if confirm_response.get("confirmation_required", False):
-                # Get the order ID from the response
-                order_id = confirm_response.get("data", {}).get("order_id")
-                if order_id:
-                    # Send confirmation
-                    confirm_cmd = f"CONFORD {order_id}"
-                    response = self.send_command(confirm_cmd)
         
         if parse:
             return parse_order_response(response)
@@ -748,23 +481,8 @@ class DirectaTrading:
             Dictionary with cancellation details or raw response string
         """
         if self.simulation_mode:
-            # In simulation mode, find and update the order in our simulated list
-            order_found = False
-            for order in self.simulated_orders.values():
-                if order["order_id"] == order_id:
-                    order["status"] = "CANCELLED"
-                    order_found = True
-                    break
-            
-            if order_found:
-                symbol = next((o["symbol"] for o in self.simulated_orders.values() if o["order_id"] == order_id), "UNKNOWN")
-                response = f"TRADOK;{symbol};{order_id};CANCELLED;CANCEL;0;0;0;0;0;SIMREF002;REVORD {order_id}"
-            else:
-                response = "ERR;N/A;1020"  # Order not found
-                
-            if not parse:
-                return response
-            return parse_order_response(response)
+            # Use the simulation instance to cancel the order
+            return self.simulation.cancel_order(order_id)
             
         # Real mode - use actual API
         response = self.send_command(f"REVORD {order_id}")
@@ -824,23 +542,8 @@ class DirectaTrading:
             Dictionary with orders data or raw response string
         """
         if self.simulation_mode:
-            # In simulation mode, return simulated orders data
-            if not self.simulated_orders:
-                # No orders
-                response = "ERR;N/A;1019"
-            else:
-                # Format order entries
-                order_lines = []
-                
-                for order in self.simulated_orders.values():
-                    line = f"ORDER;{order['symbol']};{order['time']};{order['order_id']};{order['side']};{order['price']};0;{order['quantity']};{order['status']}"
-                    order_lines.append(line)
-                
-                response = "\n".join(order_lines)
-            
-            if not parse:
-                return response
-            return parse_orders_response(response)
+            # Delegate to simulation instance
+            return self.simulation.get_orders()
             
         # Real mode - use actual API
         response = self.send_command("ORDERLIST")
@@ -936,7 +639,7 @@ class DirectaTrading:
     def add_simulated_position(self, symbol: str, quantity: int, price: float):
         """
         Add a position to the simulated portfolio.
-        If the position already exists, update its quantity and average price.
+        Delegates to the simulation instance.
         
         Args:
             symbol: The symbol of the position
@@ -947,42 +650,13 @@ class DirectaTrading:
             self.logger.warning("add_simulated_position called but simulation mode is not active")
             return
         
-        # Find if we already have this position
-        for position in self.simulated_portfolio:
-            if position["symbol"] == symbol:
-                # Calculate new average price based on quantities
-                new_qty = position["quantity"] + quantity
-                if new_qty <= 0:
-                    # Remove this position if quantity goes to 0 or negative
-                    self.simulated_portfolio = [p for p in self.simulated_portfolio if p["symbol"] != symbol]
-                    return
-                
-                position["avg_price"] = ((position["quantity"] * position["avg_price"]) + 
-                                        (quantity * price)) / new_qty
-                position["quantity"] = new_qty
-                self.logger.debug(f"Updated simulated position: {position}")
-                # Update total balance after position change
-                self.update_simulated_total_balance()
-                return
-        
-        # New position
-        if quantity <= 0:
-            self.logger.warning(f"Tried to add a new position with quantity <= 0: {symbol}, {quantity}")
-            return
-        
-        new_position = {
-            "symbol": symbol,
-            "quantity": quantity,
-            "avg_price": price
-        }
-        self.simulated_portfolio.append(new_position)
-        self.logger.debug(f"Added new simulated position: {new_position}")
-        # Update total balance after new position
-        self.update_simulated_total_balance()
+        # Delegate to simulation instance
+        self.simulation.add_position(symbol, quantity, price)
     
     def remove_simulated_position(self, symbol: str) -> bool:
         """
         Remove a position from the simulated portfolio (simulation mode only)
+        Delegates to the simulation instance.
         
         Args:
             symbol: Symbol/ticker to remove
@@ -994,19 +668,13 @@ class DirectaTrading:
             self.logger.warning("remove_simulated_position called but simulation mode is not active")
             return False
             
-        initial_length = len(self.simulated_portfolio)
-        self.simulated_portfolio = [p for p in self.simulated_portfolio if p["symbol"] != symbol]
-        
-        if len(self.simulated_portfolio) < initial_length:
-            self.logger.info(f"Removed simulated position: {symbol}")
-            return True
-            
-        self.logger.warning(f"Attempted to remove non-existent position: {symbol}")
-        return False
+        # Delegate to simulation instance
+        return self.simulation.remove_position(symbol)
     
     def update_simulated_account(self, liquidity: float = None, equity: float = None) -> None:
         """
         Update the simulated account (simulation mode only)
+        Delegates to the simulation instance.
         
         Args:
             liquidity: New liquidity value (if None, kept unchanged)
@@ -1016,38 +684,20 @@ class DirectaTrading:
             self.logger.warning("update_simulated_account called but simulation mode is not active")
             return
             
-        if liquidity is not None:
-            self.simulated_account["liquidity"] = liquidity
-            
-        if equity is not None:
-            self.simulated_account["equity"] = equity
-            
-        self.logger.info(f"Updated simulated account: liquidity={self.simulated_account['liquidity']}, equity={self.simulated_account['equity']}")
+        # Delegate to simulation instance
+        self.simulation.update_account(liquidity, equity)
     
     def fix_test(self):
-        """Reset simulated account and portfolio for testing."""
+        """
+        Reset simulated account and portfolio for testing.
+        Delegates to the simulation instance.
+        """
         if not self.simulation_mode:
             logging.warning("fix_test called but simulation mode is not active")
             return
 
-        # Reset to initial state
-        self.simulated_account = {
-            "account_code": "SIM1234",  # Important for get_account_info
-            "broker_id": "DEMO",
-            "account_name": "Simulated Account",
-            "currency": "EUR",
-            "liquidity": 10000.0,
-            "equity": 10000.0,
-            "mtd": 0.0,
-            "ytd": 0.0,
-            "pl_daily": 0.0,
-            "pl_ytd": 0.0,
-            "total_balance": 10000.0,
-        }
-        self.simulated_portfolio = []
-        self.simulated_orders = {}
-        logging.info("Simulation state reset for testing")
-        return {"success": True, "data": "Simulation reset"}
+        # Delegate to simulation instance
+        return self.simulation.reset_state()
 
     def simulate_order_execution(self, order_req: Union[str, dict], fill_price: Optional[float] = None, executed_price: Optional[float] = None) -> dict:
         """
@@ -1057,7 +707,7 @@ class DirectaTrading:
             order_req: Either the order ID (string) or the order details (dictionary)
             fill_price: Price at which the order is filled (if None, use the price from order_req)
             executed_price: Alternative name for fill_price (for backward compatibility)
-        
+            
         Returns:
             A dictionary containing the simulated response with execution details
         """
@@ -1069,107 +719,465 @@ class DirectaTrading:
         if executed_price is not None:
             fill_price = executed_price
             
-        # If order_req is a string (order ID), find the order in simulated_orders
+        # Just delegate to the simulation instance's execute_order method
         if isinstance(order_req, str):
-            order_id = order_req
-            found_order = None
-            for order in self.simulated_orders.values():
-                if order.get("order_id") == order_id:
-                    found_order = order
-                    order_req = order
-                    break
-            else:
-                return {"success": False, "error": f"Order ID {order_id} not found"}
-        
-        # Extract order details
-        symbol = order_req.get("symbol", "")
-        side = order_req.get("side", "").upper()
-        quantity = int(order_req.get("quantity", 0))
-        price = fill_price if fill_price is not None else float(order_req.get("price", 0))
-        
-        # Check for required fields
-        if not all([symbol, side, quantity, price]):
-            return {"success": False, "error": "Missing required order fields"}
-        
-        # Calculate order value
-        order_value = quantity * price
-        
-        # Update account based on order type
-        if side == "BUY":
-            # Check if we have enough liquidity
-            if order_value > self.simulated_account.get("liquidity", 0):
-                return {"success": False, "error": "Insufficient funds for buy order"}
-            
-            # Reduce liquidity
-            self.simulated_account["liquidity"] -= order_value
-            
-            # Add position
-            self.add_simulated_position(symbol, quantity, price)
-            
-        elif side == "SELL":
-            # Find the position
-            position_found = False
-            for position in self.simulated_portfolio:
-                if position["symbol"] == symbol:
-                    if position["quantity"] < quantity:
-                        return {"success": False, "error": "Insufficient shares for sell order"}
-                    
-                    # Increase liquidity (we sold shares)
-                    self.simulated_account["liquidity"] += order_value
-                    
-                    # Reduce position quantity
-                    new_qty = position["quantity"] - quantity
-                    if new_qty == 0:
-                        # Remove position completely
-                        self.simulated_portfolio = [p for p in self.simulated_portfolio if p["symbol"] != symbol]
-                    else:
-                        # Update quantity
-                        position["quantity"] = new_qty
-                    
-                    position_found = True
-                    break
-            
-            if not position_found:
-                return {"success": False, "error": f"Position {symbol} not found in portfolio"}
+            # Simple case: just an order ID
+            return self.simulation.execute_order(order_req, fill_price)
         else:
-            return {"success": False, "error": f"Unsupported order side: {side}"}
-        
-        # Update total balance after the operation
-        self.update_simulated_total_balance()
-        
-        # Create a simulated execution response
-        execution_resp = {
-            "success": True,
-            "data": {
-                "order_id": f"sim-{int(time.time() * 1000)}",
-                "symbol": symbol,
-                "side": side,
-                "quantity": quantity,
-                "price": price,
-                "value": order_value,
-                "execution_time": datetime.datetime.now().isoformat(),
-                "account_status": {
-                    "liquidity": self.simulated_account.get("liquidity", 0),
-                    "portfolio_count": len(self.simulated_portfolio),
-                    "total_balance": self.simulated_account.get("total_balance", 0)
-                }
-            }
-        }
-        
-        self.logger.info(f"Simulated order execution: {side} {quantity} {symbol} @ {price}")
-        return execution_resp
+            # Complex case: order details dictionary
+            # Extract key details and call execute_order
+            order_id = order_req.get("order_id")
+            if not order_id:
+                return {"success": False, "error": "Order ID missing from order details"}
+                
+            return self.simulation.execute_order(order_id, fill_price)
     
     def update_simulated_total_balance(self):
         """
         Update the total balance of the simulated account based on cash liquidity and portfolio value.
+        Delegates to the simulation instance.
         """
         if not self.simulation_mode:
             self.logger.warning("update_simulated_total_balance called but simulation mode is not active")
             return
             
-        portfolio_value = 0.0
-        for position in self.simulated_portfolio:
-            portfolio_value += position["quantity"] * position.get("avg_price", 0)
+        # Delegate to simulation instance
+        self.simulation.update_total_balance()
+
+    # Additional trading functions for Directa API
+    
+    def buy_limit(self, symbol: str, quantity: int, price: float, parse: bool = True) -> Union[Dict[str, Any], str]:
+        """
+        Place a limit buy order
+        
+        Args:
+            symbol: The stock symbol/ticker
+            quantity: Number of shares
+            price: Limit price
+            parse: Whether to parse the response (default: True)
             
-        self.simulated_account["total_balance"] = self.simulated_account["liquidity"] + portfolio_value
-        self.logger.info(f"Updated simulated total balance: {self.simulated_account['total_balance']}") 
+        Returns:
+            Dictionary with order details or raw response string
+        """
+        return self.place_order(symbol, "BUY", quantity, price, "LIMIT", parse)
+        
+    def sell_limit(self, symbol: str, quantity: int, price: float, parse: bool = True) -> Union[Dict[str, Any], str]:
+        """
+        Place a limit sell order
+        
+        Args:
+            symbol: The stock symbol/ticker
+            quantity: Number of shares
+            price: Limit price
+            parse: Whether to parse the response (default: True)
+            
+        Returns:
+            Dictionary with order details or raw response string
+        """
+        return self.place_order(symbol, "SELL", quantity, price, "LIMIT", parse)
+    
+    def buy_market(self, symbol: str, quantity: int, parse: bool = True) -> Union[Dict[str, Any], str]:
+        """
+        Place a market buy order
+        
+        Args:
+            symbol: The stock symbol/ticker
+            quantity: Number of shares
+            parse: Whether to parse the response (default: True)
+            
+        Returns:
+            Dictionary with order details or raw response string
+        """
+        return self.place_order(symbol, "BUY", quantity, None, "MARKET", parse)
+    
+    def sell_market(self, symbol: str, quantity: int, parse: bool = True) -> Union[Dict[str, Any], str]:
+        """
+        Place a market sell order
+        
+        Args:
+            symbol: The stock symbol/ticker
+            quantity: Number of shares
+            parse: Whether to parse the response (default: True)
+            
+        Returns:
+            Dictionary with order details or raw response string
+        """
+        return self.place_order(symbol, "SELL", quantity, None, "MARKET", parse)
+    
+    def place_stop_order(self, symbol: str, side: str, quantity: int, 
+                         limit_price: float, stop_price: float, 
+                         parse: bool = True) -> Union[Dict[str, Any], str]:
+        """
+        Place a stop order
+        
+        Args:
+            symbol: The stock symbol/ticker
+            side: "BUY" or "SELL"
+            quantity: Number of shares
+            limit_price: Limit price
+            stop_price: Stop/trigger price
+            parse: Whether to parse the response (default: True)
+            
+        Returns:
+            Dictionary with order details or raw response string
+        """
+        side = side.upper()
+        
+        # Map side to Directa API commands
+        if side == "BUY":
+            cmd_prefix = "ACQSTOP"
+        elif side == "SELL":
+            cmd_prefix = "VENSTOP"
+        else:
+            raise ValueError("Side must be either 'BUY' or 'SELL'")
+        
+        # Generate a unique order ID
+        order_id = f"ORD{int(time.time())}_{random.randint(1000, 9999)}"
+        
+        # Format: ACQSTOP/VENSTOP ID_ORDINE,TICKER,QUANTITA',PREZZO_LIMITE,PREZZO_STOP
+        command = f"{cmd_prefix} {order_id},{symbol},{quantity},{limit_price},{stop_price}"
+        
+        if self.simulation_mode:
+            # In simulation mode, create simulated order response
+            current_time = datetime.datetime.now().strftime("%H:%M:%S")
+            
+            # Create the simulated order
+            new_order = {
+                "order_id": order_id,
+                "symbol": symbol,
+                "side": side,
+                "quantity": quantity,
+                "price": limit_price,
+                "stop_price": stop_price,
+                "order_type": "STOP",
+                "status": "PENDING",
+                "time": current_time
+            }
+            
+            # Add to simulated orders dictionary
+            self.simulated_orders[order_id] = new_order
+            
+            # Create simulated response
+            response = f"TRADOK;{symbol};{order_id};SENT;{side}STOP;{quantity};{limit_price};0;0;{quantity};SIMREF001;{command}"
+            
+            if not parse:
+                return response
+            
+            return parse_order_response(response)
+        
+        # Real mode - use actual API
+        response = self.send_command(command)
+        
+        # Check if we need to confirm the order
+        if "TRADCONFIRM" in response:
+            if not parse:
+                return response
+                
+            confirm_response = parse_order_response(response)
+            if confirm_response.get("confirmation_required", False):
+                order_id = confirm_response.get("data", {}).get("order_id")
+                if order_id:
+                    confirm_cmd = f"CONFORD {order_id}"
+                    response = self.send_command(confirm_cmd)
+        
+        if parse:
+            return parse_order_response(response)
+        return response
+    
+    def buy_stop(self, symbol: str, quantity: int, limit_price: float, 
+                stop_price: float, parse: bool = True) -> Union[Dict[str, Any], str]:
+        """
+        Place a buy stop order
+        
+        Args:
+            symbol: The stock symbol/ticker
+            quantity: Number of shares
+            limit_price: Limit price
+            stop_price: Stop/trigger price
+            parse: Whether to parse the response (default: True)
+            
+        Returns:
+            Dictionary with order details or raw response string
+        """
+        return self.place_stop_order(symbol, "BUY", quantity, limit_price, stop_price, parse)
+        
+    def sell_stop(self, symbol: str, quantity: int, limit_price: float, 
+                 stop_price: float, parse: bool = True) -> Union[Dict[str, Any], str]:
+        """
+        Place a sell stop order
+        
+        Args:
+            symbol: The stock symbol/ticker
+            quantity: Number of shares
+            limit_price: Limit price
+            stop_price: Stop/trigger price
+            parse: Whether to parse the response (default: True)
+            
+        Returns:
+            Dictionary with order details or raw response string
+        """
+        return self.place_stop_order(symbol, "SELL", quantity, limit_price, stop_price, parse)
+    
+    def confirm_order(self, order_id: str, parse: bool = True) -> Union[Dict[str, Any], str]:
+        """
+        Confirm an order that requires confirmation
+        
+        Args:
+            order_id: The ID of the order to confirm
+            parse: Whether to parse the response (default: True)
+            
+        Returns:
+            Dictionary with confirmation details or raw response string
+        """
+        if self.simulation_mode:
+            # In simulation mode, find and update the order status
+            order_found = False
+            for order in self.simulated_orders.values():
+                if order["order_id"] == order_id:
+                    order["status"] = "CONFIRMED"
+                    order_found = True
+                    break
+            
+            if order_found:
+                symbol = next((o["symbol"] for o in self.simulated_orders.values() if o["order_id"] == order_id), "UNKNOWN")
+                response = f"TRADOK;{symbol};{order_id};CONFIRMED;{order.get('side', 'UNKNOWN')};{order.get('quantity', 0)};{order.get('price', 0)};0;0;{order.get('quantity', 0)};SIMREF003;CONFORD {order_id}"
+            else:
+                response = "ERR;N/A;1020"  # Order not found
+                
+            if not parse:
+                return response
+            return parse_order_response(response)
+        
+        # Real mode - use actual API
+        response = self.send_command(f"CONFORD {order_id}")
+        if parse:
+            return parse_order_response(response)
+        return response
+    
+    def place_trailing_stop_order(self, symbol: str, side: str, quantity: int, 
+                                 limit_price: float, stop_offset: float, 
+                                 parse: bool = True) -> Union[Dict[str, Any], str]:
+        """
+        Place a trailing stop order with offset from current price
+        
+        Args:
+            symbol: The stock symbol/ticker
+            side: "BUY" or "SELL"
+            quantity: Number of shares
+            limit_price: Limit price
+            stop_offset: Trailing stop offset/distance
+            parse: Whether to parse the response (default: True)
+            
+        Returns:
+            Dictionary with order details or raw response string
+        """
+        side = side.upper()
+        
+        # Map side to Directa API commands
+        if side == "BUY":
+            cmd_prefix = "ACQTST"
+        elif side == "SELL":
+            cmd_prefix = "VENTST"
+        else:
+            raise ValueError("Side must be either 'BUY' or 'SELL'")
+        
+        # Generate a unique order ID
+        order_id = f"ORD{int(time.time())}_{random.randint(1000, 9999)}"
+        
+        # Format: ACQTST/VENTST ID_ORDINE,TICKER,QUANTITA',PREZZO_LIMITE,OFFSET
+        command = f"{cmd_prefix} {order_id},{symbol},{quantity},{limit_price},{stop_offset}"
+        
+        if self.simulation_mode:
+            # In simulation mode, create simulated order response
+            current_time = datetime.datetime.now().strftime("%H:%M:%S")
+            
+            # Create the simulated order
+            new_order = {
+                "order_id": order_id,
+                "symbol": symbol,
+                "side": side,
+                "quantity": quantity,
+                "price": limit_price,
+                "stop_offset": stop_offset,
+                "order_type": "TRAILING_STOP",
+                "status": "PENDING",
+                "time": current_time
+            }
+            
+            # Add to simulated orders dictionary
+            self.simulated_orders[order_id] = new_order
+            
+            # Create simulated response
+            response = f"TRADOK;{symbol};{order_id};SENT;{side}TST;{quantity};{limit_price};0;0;{quantity};SIMREF001;{command}"
+            
+            if not parse:
+                return response
+            
+            return parse_order_response(response)
+        
+        # Real mode - use actual API
+        response = self.send_command(command)
+        
+        # Check if we need to confirm the order
+        if "TRADCONFIRM" in response:
+            if not parse:
+                return response
+                
+            confirm_response = parse_order_response(response)
+            if confirm_response.get("confirmation_required", False):
+                order_id = confirm_response.get("data", {}).get("order_id")
+                if order_id:
+                    confirm_cmd = f"CONFORD {order_id}"
+                    response = self.send_command(confirm_cmd)
+        
+        if parse:
+            return parse_order_response(response)
+        return response
+    
+    def buy_trailing_stop(self, symbol: str, quantity: int, limit_price: float, 
+                         stop_offset: float, parse: bool = True) -> Union[Dict[str, Any], str]:
+        """
+        Place a buy trailing stop order
+        
+        Args:
+            symbol: The stock symbol/ticker
+            quantity: Number of shares
+            limit_price: Limit price
+            stop_offset: Trailing stop offset/distance
+            parse: Whether to parse the response (default: True)
+            
+        Returns:
+            Dictionary with order details or raw response string
+        """
+        return self.place_trailing_stop_order(symbol, "BUY", quantity, limit_price, stop_offset, parse)
+        
+    def sell_trailing_stop(self, symbol: str, quantity: int, limit_price: float, 
+                          stop_offset: float, parse: bool = True) -> Union[Dict[str, Any], str]:
+        """
+        Place a sell trailing stop order
+        
+        Args:
+            symbol: The stock symbol/ticker
+            quantity: Number of shares
+            limit_price: Limit price
+            stop_offset: Trailing stop offset/distance
+            parse: Whether to parse the response (default: True)
+            
+        Returns:
+            Dictionary with order details or raw response string
+        """
+        return self.place_trailing_stop_order(symbol, "SELL", quantity, limit_price, stop_offset, parse)
+    
+    def place_iceberg_order(self, symbol: str, side: str, total_quantity: int, 
+                           visible_quantity: int, price: float, 
+                           parse: bool = True) -> Union[Dict[str, Any], str]:
+        """
+        Place an iceberg order (only showing part of the total quantity)
+        
+        Args:
+            symbol: The stock symbol/ticker
+            side: "BUY" or "SELL"
+            total_quantity: Total number of shares
+            visible_quantity: Visible quantity in the order book
+            price: Limit price
+            parse: Whether to parse the response (default: True)
+            
+        Returns:
+            Dictionary with order details or raw response string
+        """
+        side = side.upper()
+        
+        # Map side to Directa API commands
+        if side == "BUY":
+            cmd_prefix = "ACQICE"
+        elif side == "SELL":
+            cmd_prefix = "VENICE"
+        else:
+            raise ValueError("Side must be either 'BUY' or 'SELL'")
+        
+        # Generate a unique order ID
+        order_id = f"ORD{int(time.time())}_{random.randint(1000, 9999)}"
+        
+        # Format: ACQICE/VENICE ID_ORDINE,TICKER,QUANTITA_TOTALE,QUANTITA_VISIBILE,PREZZO
+        command = f"{cmd_prefix} {order_id},{symbol},{total_quantity},{visible_quantity},{price}"
+        
+        if self.simulation_mode:
+            # In simulation mode, create simulated order response
+            current_time = datetime.datetime.now().strftime("%H:%M:%S")
+            
+            # Create the simulated order
+            new_order = {
+                "order_id": order_id,
+                "symbol": symbol,
+                "side": side,
+                "quantity": total_quantity,
+                "visible_quantity": visible_quantity,
+                "price": price,
+                "order_type": "ICEBERG",
+                "status": "PENDING",
+                "time": current_time
+            }
+            
+            # Add to simulated orders dictionary
+            self.simulated_orders[order_id] = new_order
+            
+            # Create simulated response
+            response = f"TRADOK;{symbol};{order_id};SENT;{side}ICE;{total_quantity};{price};0;0;{total_quantity};SIMREF001;{command}"
+            
+            if not parse:
+                return response
+            
+            return parse_order_response(response)
+        
+        # Real mode - use actual API
+        response = self.send_command(command)
+        
+        # Check if we need to confirm the order
+        if "TRADCONFIRM" in response:
+            if not parse:
+                return response
+                
+            confirm_response = parse_order_response(response)
+            if confirm_response.get("confirmation_required", False):
+                order_id = confirm_response.get("data", {}).get("order_id")
+                if order_id:
+                    confirm_cmd = f"CONFORD {order_id}"
+                    response = self.send_command(confirm_cmd)
+        
+        if parse:
+            return parse_order_response(response)
+        return response
+    
+    def buy_iceberg(self, symbol: str, total_quantity: int, visible_quantity: int, 
+                   price: float, parse: bool = True) -> Union[Dict[str, Any], str]:
+        """
+        Place a buy iceberg order
+        
+        Args:
+            symbol: The stock symbol/ticker
+            total_quantity: Total number of shares
+            visible_quantity: Visible quantity in the order book
+            price: Limit price
+            parse: Whether to parse the response (default: True)
+            
+        Returns:
+            Dictionary with order details or raw response string
+        """
+        return self.place_iceberg_order(symbol, "BUY", total_quantity, visible_quantity, price, parse)
+        
+    def sell_iceberg(self, symbol: str, total_quantity: int, visible_quantity: int, 
+                    price: float, parse: bool = True) -> Union[Dict[str, Any], str]:
+        """
+        Place a sell iceberg order
+        
+        Args:
+            symbol: The stock symbol/ticker
+            total_quantity: Total number of shares
+            visible_quantity: Visible quantity in the order book
+            price: Limit price
+            parse: Whether to parse the response (default: True)
+            
+        Returns:
+            Dictionary with order details or raw response string
+        """
+        return self.place_iceberg_order(symbol, "SELL", total_quantity, visible_quantity, price, parse) 

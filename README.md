@@ -1,95 +1,159 @@
-# Directa Trading API
+# Directa API
 
-Un wrapper Python per interagire con l'API Trading di Directa SIM tramite la piattaforma Darwin.
+Una libreria Python per interagire con le API di Directa Trading, che consente di effettuare operazioni di trading e recuperare dati storici.
 
 ## Caratteristiche
 
-- Connessione all'API Trading di Directa SIM (porta 10002)
-- Gestione automatica della connessione e monitoraggio dello stato
-- Supporto per le operazioni di base (acquisto/vendita, cancellazione ordini)
-- Supporto per query di portfolio, disponibilità e informazioni account
-- Modalità simulazione per testare operazioni senza utilizzare denaro reale
-- Parser dettagliati per le risposte dell'API
+- **Trading API**: Connessione e interazione con l'API di trading Directa (porta 10002)
+  - Piazzare ordini (limite, mercato, stop, trailing stop, iceberg)
+  - Gestire ordini e posizioni
+  - Recuperare informazioni di account e portafoglio
+  - Modalità simulazione per testare strategie senza utilizzare denaro reale
+
+- **Historical Data API**: Accesso ai dati storici di Directa (porta 10003)
+  - Dati tick-by-tick
+  - Dati a candele (intraday e giornalieri)
+  - Intervalli di date personalizzati
+  - Gestione volume after-hours
+
+
+## Requisiti
+
+- Python 3.9 o versioni successive
+- Piattaforma Darwin di Directa in esecuzione sul sistema
 
 ## Installazione
 
 ```bash
-git clone https://github.com/TUOUSERNAME/directa-api-python.git
-cd directa-api-python
+# Clone del repository
+git clone https://github.com/username/directa_api.git
+cd directa_api
+
+# Installazione
 pip install -e .
 ```
 
-## Requisiti
+## Guida rapida
 
-- Python 3.9+
-- Piattaforma di trading Darwin in esecuzione
-
-## Utilizzo base
+### Trading API
 
 ```python
 from directa_api import DirectaTrading
 
-# Connessione all'API
-api = DirectaTrading()
-if api.connect():
-    # Verifica dello stato
-    status = api.get_darwin_status()
-    print(f"Stato connessione: {status['data']['connection_status']}")
+# Connessione all'API di trading
+with DirectaTrading() as api:
+    # Ottieni informazioni sull'account
+    account_info = api.get_account_info()
+    print(f"Liquidità: {account_info.get('data', {}).get('liquidity')}")
     
-    # Ottieni informazioni account
-    account = api.get_account_info()
-    print(f"Codice account: {account['data']['account_code']}")
-    print(f"Liquidità: {account['data']['liquidity']}")
+    # Piazza un ordine limite
+    order = api.buy_limit("ENI.MI", 10, 13.50)
     
-    # Ottieni portfolio
+    # Ottieni informazioni sul portafoglio
     portfolio = api.get_portfolio()
-    if portfolio['success']:
-        for position in portfolio['data']:
-            print(f"{position['symbol']}: {position['quantity_portfolio']} azioni")
     
-    # Chiusura connessione
-    api.disconnect()
+    # Verifica lo stato degli ordini
+    orders = api.get_orders()
 ```
 
-## Modalità Simulazione
-
-È possibile utilizzare la modalità simulazione per testare operazioni senza utilizzare denaro reale:
+### Historical Data API
 
 ```python
-# Crea un'istanza in modalità simulazione
-api = DirectaTrading(simulation_mode=True)
-api.connect()
+from directa_api import HistoricalData
 
-# Simula acquisto di azioni
-order = api.place_order("INTC", "BUY", 100, 50.25)
-order_id = order["data"]["order_id"]
-
-# Simula esecuzione dell'ordine
-api.simulate_order_execution(order_id, executed_price=50.00)
-
-# Verifica portfolio simulato
-portfolio = api.get_portfolio()
-print(portfolio)
-
-# Chiusura
-api.disconnect()
+# Connessione all'API per dati storici
+with HistoricalData() as api:
+    # Ottieni dati giornalieri
+    daily_candles = api.get_daily_candles("ENI.MI", days=30)
+    
+    # Ottieni dati intraday (candele a 5 minuti)
+    intraday_candles = api.get_intraday_candles("ENI.MI", days=1, period_minutes=5)
+    
+    # Ottieni dati tick by tick
+    ticks = api.get_tick_data("ENI.MI", days=1)
+    
+    # Specifica un intervallo di date
+    import datetime
+    end_date = datetime.datetime.now()
+    start_date = end_date - datetime.timedelta(days=7)
+    
+    # Candele orarie nell'intervallo
+    candles = api.get_candle_data_range("ENI.MI", start_date, end_date, period_seconds=3600)
 ```
 
-Vedere `examples/simulation_example.py` per un esempio completo.
+### Uso combinato
+
+```python
+from directa_api import DirectaTrading, HistoricalData
+import pandas as pd
+
+# Ottenimento dati storici
+with HistoricalData() as historical:
+    # Ottieni candele giornaliere
+    candles = historical.get_daily_candles("ENI.MI", days=60)
+    
+    # Converti in DataFrame pandas per l'analisi
+    df = pd.DataFrame(candles.get("data", []))
+    
+    # Calcola medie mobili
+    df.set_index('timestamp', inplace=True)
+    df['sma_10'] = df['close'].rolling(window=10).mean()
+    df['sma_20'] = df['close'].rolling(window=20).mean()
+    
+    # Genera segnali
+    df['signal'] = 0
+    df.loc[df['sma_10'] > df['sma_20'], 'signal'] = 1  # Segnale di acquisto
+    df.loc[df['sma_10'] < df['sma_20'], 'signal'] = -1  # Segnale di vendita
+
+# Esegui ordini basati sui segnali
+with DirectaTrading(simulation_mode=True) as trading:
+    # Ottieni l'ultimo segnale
+    last_signal = df['signal'].iloc[-1]
+    
+    if last_signal > 0:
+        # Segnale di acquisto
+        trading.buy_limit("ENI.MI", 10, df['close'].iloc[-1])
+    elif last_signal < 0:
+        # Segnale di vendita
+        trading.sell_limit("ENI.MI", 10, df['close'].iloc[-1])
+```
 
 ## Esempi
 
-Nella directory `examples` sono presenti diversi script di esempio:
+Nella cartella `examples/` sono presenti esempi più dettagliati:
 
-- `trading_example.py`: Esempio base di utilizzo dell'API
-- `simulation_example.py`: Esempio di utilizzo della modalità simulazione
-- `raw_socket_test.py`: Test di connessione socket semplice per diagnostica
+- `trading_examples.py` - Esempi di trading (ordini, portfolio, account info)
+- `historical_examples.py` - Esempi di recupero e analisi di dati storici
+- `combined_example.py` - Esempio di strategia che combina dati storici e trading
 
-## Note sull'API Directa
+Per eseguire gli esempi:
 
-- L'API Trading di Directa è accessibile solo quando la piattaforma Darwin è in esecuzione
-- L'API utilizza la porta 10002 per le operazioni di trading
-- È necessario avere un account Directa attivo per utilizzare l'API in modalità reale
+```bash
+python examples/trading_examples.py
+python examples/historical_examples.py
+python examples/combined_example.py
+```
+
+## Note
+
+- **Modalità simulazione**: Per evitare di utilizzare denaro reale durante i test, è possibile abilitare la modalità simulazione:
+
+```python
+api = DirectaTrading(simulation_mode=True)
+```
+
+- **Supporto per i contesti**: L'API supporta il protocollo context manager di Python per gestire automaticamente la connessione e disconnessione:
+
+```python
+with DirectaTrading() as api:
+    # Operazioni di trading
+    pass  # La disconnessione avviene automaticamente alla fine del blocco
+```
+
+## Dipendenze
+
+- La piattaforma Darwin di Directa deve essere in esecuzione sul sistema locale
+- Per l'analisi dei dati e gli esempi avanzati: pandas, matplotlib
 
 ## Licenza
 

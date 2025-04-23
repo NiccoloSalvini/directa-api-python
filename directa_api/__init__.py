@@ -1,10 +1,16 @@
-from directa_api.trading import DirectaTrading
-from directa_api.errors import ERROR_CODES, ORDER_STATUS_CODES, get_error_message, get_order_status
+#!/usr/bin/env python3
+"""
+Directa API
 
-__all__ = [
-    'DirectaTrading',
-    'ERROR_CODES',
-    'ORDER_STATUS_CODES',
-    'get_error_message',
-    'get_order_status'
-] 
+Una libreria Python per interagire con le API di Directa Trading,
+consentendo di effettuare operazioni di trading e recuperare dati storici.
+"""
+
+from directa_api.trading import DirectaTrading
+from directa_api.historical import HistoricalData
+from directa_api.connection import TradingConnection, HistoricalConnection
+from directa_api.simulation import TradingSimulation
+
+__version__ = '0.2.0'
+__all__ = ['DirectaTrading', 'HistoricalData', 'TradingConnection', 
+           'HistoricalConnection', 'TradingSimulation'] 
