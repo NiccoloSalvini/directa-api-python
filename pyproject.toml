@@ -1,0 +1,18 @@
+[tool.poetry]
+name = "directa-api-wrapper"
+version = "0.1.0"
+description = "Python wrapper for Directa Trading API"
+authors = ["Niccolo Salvini <47143429+NiccoloSalvini@users.noreply.github.com>"]
+readme = "README.md"
+packages = [{include = "directa_api"}]
+include = ["examples/*.py"]
+
+[tool.poetry.dependencies]
+python = ">=3.9,<4.0"
+pandas = "^2.2.3"
+requests = "^2.32.3"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
